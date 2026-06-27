@@ -18,7 +18,7 @@
 ---
 ## Screenshots  
   
-<img src="docs/images/simi-main.png" alt="SIMI-desktop main window" width="700">  
+<img src="docs/images/simi-main.png" alt="SIMI-desktop main window" width="200">  
   
 ---
 
