@@ -1,0 +1,85 @@
+SIMI-desktop — Build Instructions
+===================================
+
+WHAT THIS PACKAGE CONTAINS
+---------------------------
+  SIMI-desktop.ps1              — The application source (compiled by Build-Exe.ps1)
+  Build-Exe.ps1                 — Compilation script (run this to produce the exe)
+  Build-Instructions.txt        — This file
+
+  Assets\
+    ComfyUI-PNG-Meta.ps1        — Metadata extractor helper (do not delete or move)
+    Icons\
+      close.png, collapse.png, copy-icon.png, expand.png, image.png,
+      minimize.png, next.png, open.png, pin.png, previous.png,
+      stable-diffusion-blue.ico, stable-diffusion.ico
+
+
+PREREQUISITES
+-------------
+  - Windows 10 or 11
+  - PowerShell 5.1 (built into Windows — no installation needed)
+  - Internet access during the first build (to download PS2EXE from the PowerShell Gallery)
+  - The build must be run from the extracted build package folder — do not move individual
+    files out of the package before building
+
+
+HOW TO BUILD
+------------
+Option A — Right-click method (easiest):
+  1. Extract this zip to any folder on your PC.
+  2. Right-click Build-Exe.ps1 and choose "Run with PowerShell".
+  3. If Windows asks whether to allow the script to run, click "Open" or "Yes".
+  4. The console window will show progress. It may take 1-2 minutes the first
+     time while PS2EXE downloads and installs.
+
+Option B — PowerShell terminal:
+  1. Extract this zip to any folder on your PC.
+  2. Open PowerShell in that folder (Shift+right-click → "Open PowerShell window here").
+  3. Run:  .\Build-Exe.ps1
+  4. If you get an execution policy error, run this first:
+       Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+     Then re-run .\Build-Exe.ps1
+
+
+WHAT BUILD-EXE.PS1 DOES
+------------------------
+  1. Installs PS2EXE from the PowerShell Gallery (first run only; cached after that).
+  2. Compiles SIMI-desktop.ps1 into SIMI-desktop.exe.
+  3. Assembles the portable output folder with this structure:
+
+       SIMI-desktop-Portable\
+         SIMI-desktop.exe
+         Assets\
+           ComfyUI-PNG-Meta.ps1
+           Icons\
+             (all icon PNG and ICO files)
+
+  4. Zips that folder into SIMI-desktop-Portable.zip.
+
+
+USING THE PORTABLE APP
+-----------------------
+  1. Extract SIMI-desktop-Portable.zip anywhere you like.
+     The Assets folder must stay alongside the exe — do not separate them.
+  2. Double-click SIMI-desktop.exe to launch.
+  3. On first launch the status bar shows a prompt to choose an image folder.
+     Click the folder icon in the top-left of the toolbar.
+  4. On subsequent launches the app automatically re-opens the last image you
+     were viewing (as long as the file still exists at the same path).
+  5. You can also pass a PNG path directly:
+       SIMI-desktop.exe "C:\path\to\image.png"
+  6. Use the left/right arrow keys or the nav arrows below the image to browse
+     through PNGs in the same folder.
+  7. Drag and drop any ComfyUI PNG onto the app window to load it directly.
+  8. Window position, size, pin state, and last-viewed file are saved to:
+       %APPDATA%\SIMI-desktop\panel-state.json
+
+
+NOTES
+-----
+  - Fully portable: no installer, no registry entries (beyond saved state in %APPDATA%).
+  - If you rebuild, Build-Exe.ps1 will overwrite the portable folder and zip automatically.
+  - The Assets folder is required at runtime. Moving or renaming it will prevent the app
+    from loading icons or reading PNG metadata.
+  - GitHub: https://github.com/mccabedd/simi-desktop
