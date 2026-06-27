@@ -1,6 +1,6 @@
 <#
 ComfyUI-PNG-Meta.ps1
-v3.6
+v3.7
 Extracts useful ComfyUI generation metadata from PNG tEXt/iTXt/zTXt chunks.
 Outputs HTML with per-row copy buttons, plain text, JSON, or a single field for Directory Opus columns.
 #>
@@ -1512,6 +1512,20 @@ function Parse-ComfyPrompt {
     }
 
     $sampler = $nodes | Where-Object { $_.Class -match '(?i)(KSampler|SamplerCustom|SamplerAdvanced)' } | Select-Object -First 1
+
+    # Fallback: any custom sampler panel that wires both 'positive' and 'negative' as node refs
+    # (e.g. AngeloSliderLoraLite, SliderLoraLite, NO8D lite panels).
+    # Without this, the fallback CLIPTextEncode sweep bundles the negative text into PositivePrompt.
+    if ($null -eq $sampler) {
+        $sampler = $nodes | Where-Object {
+            $inp = $_.Inputs
+            if ($null -eq $inp) { return $false }
+            $posVal = Get-PropValue $inp 'positive'
+            $negVal = Get-PropValue $inp 'negative'
+            return ($null -ne $posVal -and (Is-RefArray $posVal)) -and ($null -ne $negVal -and (Is-RefArray $negVal))
+        } | Select-Object -First 1
+    }
+
     if ($null -ne $sampler -and $null -ne $sampler.Inputs) {
         $i = $sampler.Inputs
         $result.Seed = Normalize-SeedString (Get-ResolvedValueFromInputs $Prompt $i @('seed','noise_seed','rand_seed'))
