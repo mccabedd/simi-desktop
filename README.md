@@ -6,7 +6,7 @@
 
 ## Disclaimer: 
 
-- This is just a little personal pet project. Drop issues if you want, but I cannot guarantee a fix. I do enough technical support as it is!. 
+- This is just a little personal vibe coding project. Drop issues if you want, but I cannot guarantee a fix. I do enough technical support as it is!. 
 - All files contained here are '**as is**'. You are more than welcome to drop them into an AI overlord of choice to fix or fork. Just drop me a credit at least.
 
 ---
@@ -115,7 +115,7 @@ SIMI-desktop started life as a Directory Opus panel plugin. It was rebuilt as a 
 
 ---
 
-## Technical Deep Dive
+## Technical Deep Dive for all us Nerds out there
 
 This section covers how `ComfyUI-PNG-Meta.ps1` actually works under the hood — the PNG chunk parsing, the ComfyUI graph resolution strategy, the multi-stage fallback logic, and the edge cases that required non-obvious solutions. If you're just using the app, skip this. If you're extending it, debugging a workflow that produces unexpected output, or just nosy, read on.
 
