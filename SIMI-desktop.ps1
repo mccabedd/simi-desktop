@@ -38,12 +38,27 @@ public class ComfyMetaForm : Form {
     const int WM_SYSCOMMAND = 0x0112;
     const int SC_MINIMIZE   = 0xF020;
     const int SC_RESTORE    = 0xF120;
+
+    // Wired from PowerShell after form creation — called with -1 (prev) or +1 (next).
+    // Using Action<int> avoids needing to call back into PS from a C# override.
+    public System.Action<int> OnNavigate;
+
     protected override CreateParams CreateParams {
         get {
             CreateParams cp = base.CreateParams;
             cp.Style |= 0x00020000; // WS_MINIMIZEBOX
             return cp;
         }
+    }
+    protected override bool ProcessCmdKey(ref Message msg, Keys keyData) {
+        // ProcessCmdKey runs before any control — including native Win32 controls such as
+        // RichTextBox — can process the key. This is what KeyPreview + SuppressKeyPress
+        // fails to guarantee for native controls.
+        if (OnNavigate != null && (keyData == Keys.Left || keyData == Keys.Right)) {
+            OnNavigate(keyData == Keys.Left ? -1 : 1);
+            return true;  // consumed; focused control never sees it
+        }
+        return base.ProcessCmdKey(ref msg, keyData);
     }
     protected override void WndProc(ref Message m) {
         if (m.Msg == WM_SYSCOMMAND) {
@@ -390,17 +405,18 @@ $form.Add_Paint({
 })
 $form.Add_KeyDown({
     param($sender, $eventArgs)
-    if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $form.Close(); return }
-    if ($script:showImage -and $null -ne $script:currentImage) {
-        if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Left) {
-            $eventArgs.SuppressKeyPress = $true
-            Navigate-Image -1
-        } elseif ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Right) {
-            $eventArgs.SuppressKeyPress = $true
-            Navigate-Image 1
-        }
-    }
+    # Escape to close; Left/Right are handled by ProcessCmdKey in ComfyMetaForm
+    # so they work regardless of which control (including RichTextBox) has focus.
+    if ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $form.Close() }
 })
+
+# Wire the ProcessCmdKey navigation callback.
+# PowerShell functions are looked up at call time, so Navigate-Image doesn't need
+# to be defined yet at this point — it just needs to exist before the user presses a key.
+$form.OnNavigate = [System.Action[int]]{
+    param([int]$d)
+    if ($script:showImage -and $null -ne $script:currentImage) { Navigate-Image $d }
+}
 
 function Get-VisibleScreenRect {
     param([int]$Left, [int]$Top, [int]$Width, [int]$Height)
