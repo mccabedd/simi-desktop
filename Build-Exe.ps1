@@ -6,7 +6,7 @@ $here    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $appName = 'SIMI-desktop'
 $ps1     = Join-Path $here "$appName.ps1"
 $exe     = Join-Path $here "$appName.exe"
-$iconFile = Join-Path $here 'Assets\Icons\stable-diffusion.ico'
+$iconFile = Join-Path $here 'Assets\Icons\simi-desktop.ico'
 
 Write-Host 'Checking for PS2EXE...'
 if (-not (Get-Module -ListAvailable -Name ps2exe)) {
@@ -23,7 +23,7 @@ Invoke-ps2exe `
     -noConsole `
     -title       'SIMI-desktop' `
     -description 'Simple Image Metadata Inspector — standalone ComfyUI PNG metadata viewer' `
-    -version     '3.6.0.0'
+    -version     '1.4.0.0'
 
 Write-Host 'Building portable folder...'
 $outDir = Join-Path $here "$appName-Portable"
@@ -43,7 +43,8 @@ $icons = @(
     'close.png','collapse.png','copy-icon.png','expand.png',
     'image.png','minimize.png','next.png','open.png',
     'pin.png','previous.png',
-    'stable-diffusion-blue.ico','stable-diffusion.ico'
+    'layout-h.png','layout-v.png',
+    'simi-desktop-blue.ico','simi-desktop.ico'
 )
 foreach ($f in $icons) {
     $src = Join-Path $here "Assets\Icons\$f"

@@ -12,7 +12,8 @@ WHAT THIS PACKAGE CONTAINS
     Icons\
       close.png, collapse.png, copy-icon.png, expand.png, image.png,
       minimize.png, next.png, open.png, pin.png, previous.png,
-      stable-diffusion-blue.ico, stable-diffusion.ico
+      layout-h.png, layout-v.png,
+      simi-desktop-blue.ico, simi-desktop.ico
 
 
 PREREQUISITES

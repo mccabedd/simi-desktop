@@ -4,32 +4,36 @@
 
 ---
 
-## Disclaimer: 
+## Disclaimer
 
-- This is just a little personal vibe coding project. Drop issues if you want, but I cannot guarantee a fix. I do enough technical support as it is!. 
+- This is just a little personal vibe coding project. Drop issues if you want, but I cannot guarantee a fix. I do enough technical support as it is!
 - All files contained here are '**as is**'. You are more than welcome to drop them into an AI overlord of choice to fix or fork. Just drop me a credit at least.
 
 ---
+
 ## Features
 
-- **Instant metadata display** - reads ComfyUI workflow data embedded in PNG files and presents it in a clean, readable panel
-- **Drag and drop** - drop any ComfyUI PNG onto the app window to load it immediately
-- **Folder browsing** - open a folder and navigate through all PNGs in it with the previous/next arrows or keyboard left/right
-- **Image preview** - displays the image alongside its metadata
-- **Remembers last session** - re-opens the last viewed image automatically on next launch
-- **Portable** - no installer, no registry entries; runs from any folder
-- **Dark themed** - easy on the eyes in a typical AI image generation workflow
-- **Always-on-top / pin** - keep the panel visible while working in other apps
-- **Collapse mode** - shrink the panel to just the toolbar when you need the screen space
-- **Tiny file size** - Only ~200Kb extracted!
+- **Instant metadata display** — reads ComfyUI workflow data embedded in PNG files and presents it in a clean, readable panel
+- **Drag and drop** — drop any ComfyUI PNG onto the app window to load it immediately
+- **Folder browsing** — open a folder and navigate through all PNGs in it with the previous/next arrows or keyboard left/right
+- **Image preview** — displays the image alongside its metadata
+- **Dual layout modes** — switch between vertical (classic stacked panel) and horizontal (5-column side-by-side view) with a single toolbar button; each mode remembers its own window size
+- **Remembers last session** — re-opens the last viewed image and layout mode automatically on next launch
+- **Portable** — no installer, no registry entries; runs from any folder
+- **Dark themed** — easy on the eyes in a typical AI image generation workflow; all scrollbars use a matching custom dark track
+- **Always-on-top / pin** — keep the panel visible while working in other apps
+- **Collapse mode** — shrink the panel to just the toolbar when you need the screen space (vertical mode)
+- **Copy buttons** — every metadata field has its own copy-to-clipboard button; double-click on prompt text also copies
+- **Tiny file size** — only ~200Kb extracted!
 
 ---
+
 ## Screenshots
 
 |                                                     |                                                     |                                                     |                                                     |
 | --------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------- | --------------------------------------------------- |
 | <img src="docs/images/simi-main-1.png" width="200"> | <img src="docs/images/simi-main-2.png" width="200"> | <img src="docs/images/simi-main-3.png" width="200"> | <img src="docs/images/simi-main-4.png" width="200"> |
-  
+
 ---
 
 ## Requirements
@@ -64,11 +68,65 @@ Assets\
 | Open a folder | Click the folder icon in the toolbar |
 | Drop a file | Drag any ComfyUI PNG onto the app window |
 | Browse images | Left / Right arrow keys, or the nav arrows below the image |
+| Switch layout | Click the layout toggle button (H / V) in the toolbar |
 | Pin on top | Click the pin icon |
-| Collapse | Click the collapse icon to shrink to toolbar only |
+| Collapse | Click the collapse icon to shrink to toolbar only (vertical mode) |
 | About | Click the `?` button in the toolbar |
+| Copy a field | Click the copy icon on any metadata row, or double-click prompt text |
 
-On first launch, the status bar prompts you to choose a folder. After that, the app remembers and re-opens your last image automatically.
+On first launch, the status bar prompts you to choose a folder. After that, the app remembers and re-opens your last image and layout automatically.
+
+---
+
+## Layout Modes
+
+### Vertical (default)
+
+The classic stacked view. Each metadata field is its own labelled row with a copy button, scrolling top-to-bottom. The negative prompt row is hidden entirely when absent. Resize freely; the panel remembers its own dimensions.
+
+### Horizontal
+
+A side-by-side view useful on wide monitors. Five columns are shown left to right:
+
+| Column | Contents |
+|---|---|
+| **Image** | Preview with folder navigation arrows |
+| **Positive Prompt** | Full prompt text, scrollable |
+| **Negative Prompt** | Full negative prompt, scrollable — hidden when absent |
+| **Info** | Seed, Resolution, Model, Text Encoder — each as its own bordered row |
+| **Sampler** | LoRA's, Sampler, Scheduler, Steps, CFG — each as its own bordered row |
+
+All scrollbars in horizontal mode use the same custom dark track as the rest of the UI. The horizontal window size is remembered independently from the vertical window size.
+
+---
+
+## Metadata Fields Displayed
+
+The app extracts and displays whatever ComfyUI embeds in the PNG, typically including:
+
+- Positive and negative prompts
+- Seed
+- Resolution
+- Model / checkpoint
+- LoRAs
+- Sampler, steps, CFG scale
+- Text encoder / CLIP
+
+Fields not present in a given image are shown as `N/A`. The negative prompt field is suppressed entirely when empty.
+
+**NOTE:** Not all PNG files contain embedded metadata. Please be aware of this before complaining.
+
+---
+
+## State File Location
+
+Session state (window position, size, layout mode, last opened file) is saved to:
+
+```
+%APPDATA%\SIMI-desktop\panel-state.json
+```
+
+On a typical Windows install this is `C:\Users\<you>\AppData\Roaming\SIMI-desktop\panel-state.json`. If the app opens off-screen after a monitor configuration change, it detects this automatically and resets to a default position — but if needed, deleting this file and restarting is always a clean reset.
 
 ---
 
@@ -91,28 +149,6 @@ If you get an execution policy error:
 ```powershell
 Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
-
----
-
-## Metadata Fields Displayed
-
-The app extracts and displays whatever ComfyUI embeds in the PNG, typically including:
-
-- Positive and negative prompts
-- Seed
-- Resolution
-- Model / checkpoint
-- LoRAs
-- Sampler, steps, CFG scale
-
-Fields not present in a given image are shown as `N/A`, or will describe the error in red text.
-**NOTE:** Not all PNG files contain embedded metadata. Please be aware of this before complaining.
-
----
-
-## Origin
-
-SIMI-desktop started life as a Directory Opus panel plugin. It was rebuilt as a fully standalone portable app, removing all DOpus dependencies while retaining the same metadata extraction core (`ComfyUI-PNG-Meta.ps1`).
 
 ---
 
@@ -275,7 +311,7 @@ If you find a workflow where a field shows `N/A` but the data is clearly in the 
 
 ## License
 
-MIT - do whatever you like with it, but at least write me a credit somewhere
+MIT — do whatever you like with it, but at least write me a credit somewhere.
 
 ---
 

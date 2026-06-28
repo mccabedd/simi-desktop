@@ -65,6 +65,15 @@ public static class AppUserModel {
     public static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
 }
 '@
+
+# Minimal Win32 shim — only SendMessage needed to drive EM_LINESCROLL on the prompt RichTextBoxes.
+Add-Type -TypeDefinition @'
+using System.Runtime.InteropServices;
+public static class Win32 {
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    public static extern System.IntPtr SendMessage(System.IntPtr hWnd, uint Msg, System.IntPtr wParam, System.IntPtr lParam);
+}
+'@
 $WarningPreference = 'Continue'
 [AppUserModel]::SetCurrentProcessExplicitAppUserModelID('SIMI.desktop') | Out-Null
 
@@ -134,6 +143,27 @@ $script:prevIcon     = $null
 $script:nextIcon     = $null
 $script:isCollapsed    = $false
 $script:expandedHeight = 0
+$script:layoutMode     = 'Vertical'   # 'Vertical' | 'Horizontal'
+$script:vertWidth      = 0            # remembered vertical-mode width
+$script:vertHeight     = 0            # remembered vertical-mode height
+$script:horzIconH      = $null        # toolbar icon: switch to horizontal
+$script:horzIconV      = $null        # toolbar icon: switch to vertical
+$script:horzImageBox   = $null        # PictureBox in horizontal image column
+$script:horzPrevArrow  = $null
+$script:horzNextArrow  = $null
+$script:horzImgCounter = $null
+$script:horzPosRtb     = $null        # positive prompt RichTextBox
+$script:horzNegRtb     = $null        # negative prompt RichTextBox
+$script:horzPosDragging = $false      # RTB custom scroll drag state — positive column
+$script:horzPosDragY    = 0
+$script:horzPosDragLine = 0
+$script:horzNegDragging = $false      # RTB custom scroll drag state — negative column
+$script:horzNegDragY    = 0
+$script:horzNegDragLine = 0
+$script:horzInfoRows   = New-Object System.Collections.Generic.List[object]  # mini-row models for Info column
+$script:horzSampRows   = New-Object System.Collections.Generic.List[object]  # mini-row models for Sampler column
+$script:horzInfoScroll = @{ Offset=0; MaxScroll=0; ContentH=0; Dragging=$false; DragY=0; DragOffset=0; Track=$null; Thumb=$null; Viewport=$null; Content=$null }
+$script:horzSampScroll = @{ Offset=0; MaxScroll=0; ContentH=0; Dragging=$false; DragY=0; DragOffset=0; Track=$null; Thumb=$null; Viewport=$null; Content=$null }
 $script:closeIcon       = $null
 $script:collapseIcon    = $null
 $script:expandIcon      = $null
@@ -216,6 +246,29 @@ try {
     if ($null -ne $script:pinIconNormal)   { $script:pinIconDimmed   = New-DimmedBitmap $script:pinIconNormal   }
 } catch {}
 
+# Layout-toggle icons. Drop layout-h.png / layout-v.png into Assets\Icons\ for proper artwork.
+# Falls back to generated letter bitmaps (H / V) if the files are absent.
+try {
+    function New-LayoutIcon { param([string]$Letter)
+        $bmp = New-Object System.Drawing.Bitmap -ArgumentList 14, 14
+        $g   = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.Clear([System.Drawing.Color]::Transparent)
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAlias
+        $br  = New-Object System.Drawing.SolidBrush -ArgumentList ([System.Drawing.Color]::FromArgb(200, 200, 200))
+        $ft  = New-Object System.Drawing.Font -ArgumentList 'Segoe UI', 7.5, ([System.Drawing.FontStyle]::Bold)
+        $sf  = New-Object System.Drawing.StringFormat
+        $sf.Alignment = 'Center'; $sf.LineAlignment = 'Center'
+        $rf  = New-Object System.Drawing.RectangleF -ArgumentList 0, 0, 14, 14
+        $g.DrawString($Letter, $ft, $br, $rf, $sf)
+        $sf.Dispose(); $ft.Dispose(); $br.Dispose(); $g.Dispose()
+        return $bmp
+    }
+    $hpng = Join-Path $iconsDir 'layout-h.png'
+    $vpng = Join-Path $iconsDir 'layout-v.png'
+    $script:horzIconH = if (Test-Path -LiteralPath $hpng) { Load-TbIcon 'layout-h' } else { New-LayoutIcon 'H' }
+    $script:horzIconV = if (Test-Path -LiteralPath $vpng) { Load-TbIcon 'layout-v' } else { New-LayoutIcon 'V' }
+} catch {}
+
 function Display-Value {
     param([string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { return 'N/A' }
@@ -281,11 +334,13 @@ function Set-PanelImage {
         } finally {
             $fs.Dispose()
         }
-        if ($null -ne $imageBox) { $imageBox.Image = $script:currentImage }
+        if ($null -ne $imageBox)              { $imageBox.Image = $script:currentImage }
+        if ($null -ne $script:horzImageBox)   { $script:horzImageBox.Image = $script:currentImage }
     } catch {
         $script:currentImage = $null
         $script:imageAspect = 1.0
-        if ($null -ne $imageBox) { $imageBox.Image = $null }
+        if ($null -ne $imageBox)              { $imageBox.Image = $null }
+        if ($null -ne $script:horzImageBox)   { $script:horzImageBox.Image = $null }
     }
 }
 
@@ -322,7 +377,7 @@ $form.KeyPreview = $true
 
 # Blue-tinted SD icon for the taskbar button.
 try {
-    $sdBluePath = Join-Path $iconsDir 'stable-diffusion-blue.ico'
+    $sdBluePath = Join-Path $iconsDir 'simi-desktop-blue.ico'
     if (Test-Path -LiteralPath $sdBluePath) {
         $form.Icon = New-Object System.Drawing.Icon -ArgumentList $sdBluePath
     }
@@ -372,6 +427,15 @@ function Load-PanelState {
         $form.Top = $t
         if ($null -ne $state.TopMost)   { $form.TopMost = [bool]$state.TopMost }
         if ($state.LastFile)            { $script:restoredFile = [string]$state.LastFile }
+        if ($null -ne $state.LayoutMode -and [string]$state.LayoutMode -ne '') {
+            $script:layoutMode = [string]$state.LayoutMode
+        }
+        if ($null -ne $state.VertWidth -and [int]$state.VertWidth -gt 0) {
+            $script:vertWidth  = [int]$state.VertWidth
+            $script:vertHeight = [int]$state.VertHeight
+        }
+        # When restoring into horizontal mode, the saved Width/Height are the horz dimensions — keep them.
+        # The vertical dims are in VertWidth/VertHeight above.
         $script:loadingState = $false
         return $true
     } catch {
@@ -383,12 +447,15 @@ function Load-PanelState {
 function Save-PanelState {
     try {
         $state = [ordered]@{
-            Left = $form.Left
-            Top = $form.Top
-            Width = $form.Width
-            Height = $form.Height
-            TopMost = $form.TopMost
-            LastFile = $script:currentFile
+            Left       = $form.Left
+            Top        = $form.Top
+            Width      = $form.Width
+            Height     = $form.Height
+            VertWidth  = if ($script:layoutMode -eq 'Horizontal') { $script:vertWidth  } else { $form.Width  }
+            VertHeight = if ($script:layoutMode -eq 'Horizontal') { $script:vertHeight } else { $form.Height }
+            LayoutMode = $script:layoutMode
+            TopMost    = $form.TopMost
+            LastFile   = $script:currentFile
         }
         ($state | ConvertTo-Json -Depth 4) | Set-Content -LiteralPath $panelStateFile -Encoding UTF8
         $script:stateDirty = $false
@@ -607,6 +674,15 @@ $pinBtn.Add_Click({
 })
 $toolbar.Controls.Add($pinBtn)
 
+# Layout toggle — single button, icon/tooltip swaps between H and V mode
+$layoutBtn = Make-TbBtn -Icon $script:horzIconH -FallbackText 'H' -TipText 'Switch to Horizontal'
+$layoutBtn.Left = 286
+$layoutBtn.Add_Click({
+    $newMode = if ($script:layoutMode -eq 'Vertical') { 'Horizontal' } else { 'Vertical' }
+    Apply-LayoutMode $newMode
+})
+$toolbar.Controls.Add($layoutBtn)
+
 # Collapse / Expand
 $collapseBtn = Make-TbBtn -Icon $script:collapseIcon -FallbackText 'C' -TipText 'Collapse'
 $collapseBtn.Left = 342
@@ -629,10 +705,24 @@ $toolbar.Controls.Add($closeButton)
 Update-ImageBtnState
 Update-PinBtnState
 
+# $contentHost holds both the vertical scroll layout and the horizontal layout.
+# Only one is visible at a time — toggling Visible on each triggers WinForms to
+# re-run Dock=Fill layout so the active panel fills the available space.
+$contentHost = New-Object System.Windows.Forms.Panel
+$contentHost.Dock = 'Fill'
+$contentHost.BackColor = $bg
+$main.Controls.Add($contentHost, 0, 1)
+
 $scrollHost = New-Object System.Windows.Forms.Panel
 $scrollHost.Dock = 'Fill'
 $scrollHost.BackColor = $bg
-$main.Controls.Add($scrollHost, 0, 1)
+$contentHost.Controls.Add($scrollHost)
+
+$horzContainer = New-Object System.Windows.Forms.Panel
+$horzContainer.Dock = 'Fill'
+$horzContainer.BackColor = $bg
+$horzContainer.Visible = $false
+$contentHost.Controls.Add($horzContainer)
 
 $scrollTrack = New-Object System.Windows.Forms.Panel
 $scrollTrack.Dock = 'Right'
@@ -854,7 +944,649 @@ function Scroll-By {
     Set-CustomScrollOffset ([int]($script:scrollOffset + $Delta))
 }
 
+
+# ── Horizontal layout ─────────────────────────────────────────────────────────
+# 5-column TableLayoutPanel inside $horzContainer.
+# Columns: Image | Positive Prompt | Negative Prompt | Info | Sampler
+
+$horzTable = New-Object System.Windows.Forms.TableLayoutPanel
+$horzTable.Dock            = 'Fill'
+$horzTable.ColumnCount     = 5
+$horzTable.RowCount        = 1
+$horzTable.BackColor       = $bg
+$horzTable.Padding         = New-Object System.Windows.Forms.Padding -ArgumentList 4
+$horzTable.CellBorderStyle = [System.Windows.Forms.TableLayoutPanelCellBorderStyle]::None
+[void]$horzTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Absolute, 192)))
+[void]$horzTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 32)))
+[void]$horzTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 22)))
+[void]$horzTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 23)))
+[void]$horzTable.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle([System.Windows.Forms.SizeType]::Percent, 23)))
+[void]$horzTable.RowStyles.Add((New-Object System.Windows.Forms.RowStyle([System.Windows.Forms.SizeType]::Percent, 100)))
+$horzContainer.Controls.Add($horzTable)
+
+function New-HorzCol {
+    param([string]$Title, [int]$ColIndex)
+    $cp = New-Object System.Windows.Forms.Panel
+    $cp.Dock = 'Fill'
+    $cp.BackColor = $rowBg
+    $cp.Margin  = New-Object System.Windows.Forms.Padding -ArgumentList 3, 4, 3, 4
+    $cp.Padding = New-Object System.Windows.Forms.Padding -ArgumentList 1  # exposes painted border
+    $cp.Add_Paint({
+        param($s, $e)
+        $r = New-Object System.Drawing.Rectangle -ArgumentList 0, 0, ($s.Width - 1), ($s.Height - 1)
+        $p = New-Object System.Drawing.Pen -ArgumentList $rowBorder
+        try { $e.Graphics.DrawRectangle($p, $r) } finally { $p.Dispose() }
+    })
+    $hdr = New-Object System.Windows.Forms.Label
+    $hdr.Text      = $Title
+    $hdr.Dock      = 'Top'
+    $hdr.Height    = 24
+    $hdr.BackColor = $toolbarBg
+    $hdr.ForeColor = $fg
+    $hdr.Font      = $titleFont
+    $hdr.TextAlign = 'MiddleLeft'
+    $hdr.Padding   = New-Object System.Windows.Forms.Padding -ArgumentList 6, 0, 0, 0
+    $sc = New-Object System.Windows.Forms.Panel
+    $sc.Dock       = 'Fill'
+    $sc.BackColor  = $rowBg
+    $sc.AutoScroll = $false   # RTB handles its own internal scroll
+    $cp.Controls.Add($sc)
+    $cp.Controls.Add($hdr)
+    $horzTable.Controls.Add($cp, $ColIndex, 0)
+    return [pscustomobject]@{ Panel = $cp; Header = $hdr; Scroll = $sc }
+}
+
+function New-HorzRtb {
+    $r = New-Object System.Windows.Forms.RichTextBox
+    $r.Dock        = 'Fill'
+    $r.BackColor   = $rowBg
+    $r.ForeColor   = $fg
+    $r.Font        = $valueFont
+    $r.ReadOnly    = $true
+    $r.BorderStyle = 'None'
+    $r.WordWrap    = $true
+    $r.ScrollBars  = 'None'    # custom dark track handles scrolling; this hides the system chrome
+    $r.Padding     = New-Object System.Windows.Forms.Padding -ArgumentList 6, 4, 4, 4
+    return $r
+}
+
+# Column 0 — Image (no AutoScroll; PictureBox Zoom handles everything)
+$horzCol0 = New-HorzCol 'Image' 0
+$horzCol0.Scroll.AutoScroll = $false
+
+$horzImgPb = New-Object System.Windows.Forms.PictureBox
+$horzImgPb.Dock      = 'Fill'
+$horzImgPb.BackColor = $rowBg
+$horzImgPb.SizeMode  = [System.Windows.Forms.PictureBoxSizeMode]::Zoom
+$toolTip.SetToolTip($horzImgPb, 'Double-click to open in viewer')
+$horzImgPb.Add_DoubleClick({
+    $f = $script:currentFile
+    if ([string]::IsNullOrWhiteSpace($f) -or -not (Test-Path -LiteralPath $f)) { return }
+    try {
+        if ($null -ne $script:dopusrt) {
+            $folder = [System.IO.Path]::GetDirectoryName($f)
+            $name   = [System.IO.Path]::GetFileName($f)
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $script:dopusrt
+            $psi.Arguments = "/cmd Go `"$folder`" & Select FILE=`"$name`" DESELECTALL & Show"
+            $psi.WindowStyle = [System.Diagnostics.ProcessWindowStyle]::Hidden
+            $psi.CreateNoWindow = $true
+            [System.Diagnostics.Process]::Start($psi) | Out-Null
+        } else { Start-Process -FilePath $f }
+    } catch { try { Start-Process -FilePath $f } catch {} }
+})
+$script:horzImageBox = $horzImgPb
+
+$horzNavBar = New-Object System.Windows.Forms.Panel
+$horzNavBar.Dock      = 'Bottom'
+$horzNavBar.Height    = 24
+$horzNavBar.BackColor = $rowBg
+$horzNavBar.Visible   = $false
+
+$horzPrevBtn = New-Object System.Windows.Forms.Label
+$horzPrevBtn.Text      = if ($null -eq $script:prevIcon) { '<' } else { '' }
+if ($null -ne $script:prevIcon) { $horzPrevBtn.Image = $script:prevIcon; $horzPrevBtn.ImageAlign = 'MiddleCenter' }
+$horzPrevBtn.BackColor = $rowBg; $horzPrevBtn.ForeColor = $muted
+$horzPrevBtn.Width = 22; $horzPrevBtn.Height = 22; $horzPrevBtn.Top = 1; $horzPrevBtn.Left = 4
+$horzPrevBtn.Cursor = [System.Windows.Forms.Cursors]::Hand
+$horzPrevBtn.Add_Click({ Navigate-Image -1 })
+$horzNavBar.Controls.Add($horzPrevBtn)
+$script:horzPrevArrow = $horzPrevBtn
+
+$horzNextBtn = New-Object System.Windows.Forms.Label
+$horzNextBtn.Text      = if ($null -eq $script:nextIcon) { '>' } else { '' }
+if ($null -ne $script:nextIcon) { $horzNextBtn.Image = $script:nextIcon; $horzNextBtn.ImageAlign = 'MiddleCenter' }
+$horzNextBtn.BackColor = $rowBg; $horzNextBtn.ForeColor = $muted
+$horzNextBtn.Width = 22; $horzNextBtn.Height = 22; $horzNextBtn.Top = 1
+$horzNextBtn.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+$horzNextBtn.Cursor = [System.Windows.Forms.Cursors]::Hand
+$horzNextBtn.Add_Click({ Navigate-Image 1 })
+$horzNavBar.Controls.Add($horzNextBtn)
+$script:horzNextArrow = $horzNextBtn
+
+$horzImgCtr = New-Object System.Windows.Forms.Label
+$horzImgCtr.Text = ''; $horzImgCtr.ForeColor = $muted; $horzImgCtr.BackColor = $rowBg
+$horzImgCtr.Font = New-Object System.Drawing.Font -ArgumentList 'Segoe UI', 8.2
+$horzImgCtr.TextAlign = 'MiddleCenter'
+$horzImgCtr.Top = 1; $horzImgCtr.Height = 22
+$horzImgCtr.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
+$horzNavBar.Controls.Add($horzImgCtr)
+$script:horzImgCounter = $horzImgCtr
+
+$horzNavBar.Add_SizeChanged({
+    $script:horzNextArrow.Left = $horzNavBar.Width - $script:horzNextArrow.Width - 4
+    $script:horzImgCounter.Left  = $script:horzPrevArrow.Right + 4
+    $script:horzImgCounter.Width = $script:horzNextArrow.Left - $script:horzPrevArrow.Right - 8
+})
+
+$horzCol0.Scroll.Controls.Add($horzNavBar)
+$horzCol0.Scroll.Controls.Add($horzImgPb)
+
+# Copy button for prompt column headers.
+# param($s,$e) is required — $sender is NOT auto-bound in PS WinForms without it.
+function Add-HorzCopyBtn {
+    param($HeaderPanel, $Rtb)
+    $cb = New-Object System.Windows.Forms.Button
+    $cb.FlatStyle = 'Flat'
+    $cb.ForeColor = $fg
+    $cb.BackColor = $copyButtonBg
+    $cb.FlatAppearance.BorderSize = 0
+    $cb.FlatAppearance.MouseOverBackColor = $copyButtonHoverBg
+    $cb.FlatAppearance.MouseDownBackColor = $copyButtonBg
+    if ($null -ne $script:copyIcon) {
+        $cb.Text = ''; $cb.Image = $script:copyIcon
+        $cb.ImageAlign = 'MiddleCenter'
+        $cb.Padding = New-Object System.Windows.Forms.Padding -ArgumentList 1
+        $toolTip.SetToolTip($cb, 'Copy')
+        $cb.Width = 14; $cb.Height = 12
+    } else {
+        $cb.Text = 'Copy'; $cb.Width = 40; $cb.Height = 18
+    }
+    $cb.Top    = [int](($HeaderPanel.Height - $cb.Height) / 2)
+    $cb.Left   = $HeaderPanel.Width - $cb.Width - 8
+    $cb.Anchor = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Right
+    $cb.Tag    = $Rtb
+    $cb.Add_Click({
+        param($s, $e)
+        $t = $s.Tag.Text
+        if (-not [string]::IsNullOrWhiteSpace($t) -and $t -ne 'N/A') {
+            [System.Windows.Forms.Clipboard]::SetText($t)
+            $statusLabel.Text = 'Copied'
+            $statusRevertTimer.Stop(); $statusRevertTimer.Start()
+        }
+    })
+    $HeaderPanel.Controls.Add($cb)
+}
+
+# Per-field mini row for Info/Sampler columns — same style as vertical-mode rows.
+# Returns a model object so the caller can update ValueLabel.Text on image load.
+function New-HorzMiniRow {
+    param([string]$Label, [System.Windows.Forms.Panel]$Container)
+
+    $rowPanel = New-Object System.Windows.Forms.Panel
+    $rowPanel.BackColor = $rowBg
+    $rowPanel.Add_Paint({
+        param($s, $e)
+        $r = New-Object System.Drawing.Rectangle -ArgumentList 0, 0, ($s.Width - 1), ($s.Height - 1)
+        $p = New-Object System.Drawing.Pen -ArgumentList $rowBorder
+        try { $e.Graphics.DrawRectangle($p, $r) } finally { $p.Dispose() }
+    })
+
+    $titleLbl = New-Object System.Windows.Forms.Label
+    $titleLbl.Text      = $Label
+    $titleLbl.ForeColor = $fg
+    $titleLbl.BackColor = $rowBg
+    $titleLbl.Font      = $titleFont
+    $titleLbl.AutoEllipsis = $true
+    $titleLbl.TextAlign = 'MiddleLeft'
+
+    $copyBtn = New-Object System.Windows.Forms.Button
+    $copyBtn.FlatStyle = 'Flat'
+    $copyBtn.ForeColor = $fg
+    $copyBtn.BackColor = $copyButtonBg
+    $copyBtn.FlatAppearance.BorderSize = 0
+    $copyBtn.FlatAppearance.MouseOverBackColor = $copyButtonHoverBg
+    $copyBtn.FlatAppearance.MouseDownBackColor = $copyButtonBg
+    if ($null -ne $script:copyIcon) {
+        $copyBtn.Text = ''; $copyBtn.Image = $script:copyIcon
+        $copyBtn.ImageAlign = 'MiddleCenter'
+        $copyBtn.Padding = New-Object System.Windows.Forms.Padding -ArgumentList 1
+        $toolTip.SetToolTip($copyBtn, 'Copy')
+        $copyBtn.Width = 14; $copyBtn.Height = 12
+    } else {
+        $copyBtn.Text = 'Copy'; $copyBtn.Width = 54; $copyBtn.Height = 24
+    }
+
+    $valueLbl = New-Object System.Windows.Forms.Label
+    $valueLbl.Text      = 'N/A'
+    $valueLbl.ForeColor = $fg
+    $valueLbl.BackColor = $rowBg
+    $valueLbl.Font      = $valueFont
+    $valueLbl.AutoSize  = $false
+    $valueLbl.TextAlign = 'TopLeft'
+
+    # Tag = the value label so the click handler always reads the current displayed value
+    $copyBtn.Tag = $valueLbl
+    $copyBtn.Add_Click({
+        param($s, $e)
+        $t = $s.Tag.Text
+        if (-not [string]::IsNullOrWhiteSpace($t) -and $t -ne 'N/A') {
+            [System.Windows.Forms.Clipboard]::SetText($t)
+            $statusLabel.Text = 'Copied'
+            $statusRevertTimer.Stop(); $statusRevertTimer.Start()
+        }
+    })
+
+    $rowPanel.Controls.Add($valueLbl)
+    $rowPanel.Controls.Add($titleLbl)
+    $rowPanel.Controls.Add($copyBtn)
+    $Container.Controls.Add($rowPanel)
+
+    return [pscustomobject]@{ Panel = $rowPanel; Title = $titleLbl; ValueLabel = $valueLbl; CopyButton = $copyBtn }
+}
+
+# Positions mini-rows within their column scroll panel (same logic as Layout-MetaRows, scoped to one column).
+function Update-HorzMiniThumb {
+    param([hashtable]$ScrollObj)
+    $so = $ScrollObj
+    if ($null -eq $so.Content) { return }
+    $so.Content.Top = -[int]$so.Offset
+    $needsScroll = $so.MaxScroll -gt 0
+    $so.Track.Visible = $needsScroll
+    if (-not $needsScroll) { return }
+    $trackH = [Math]::Max(1, $so.Track.ClientSize.Height)
+    $vh     = [Math]::Max(1, $so.Viewport.ClientSize.Height)
+    $ch     = [Math]::Max(1, $so.ContentH)
+    $thumbH = [Math]::Max(20, [int]($trackH * ([double]$vh / [double]$ch)))
+    if ($thumbH -ge $trackH) { $so.Track.Visible = $false; return }
+    $range  = [Math]::Max(1, $trackH - $thumbH)
+    $pos    = if ($so.MaxScroll -gt 0) { [int](([double]$so.Offset / [double]$so.MaxScroll) * $range) } else { 0 }
+    $so.Thumb.Height = $thumbH
+    $so.Thumb.Top    = [Math]::Min($range, [Math]::Max(0, $pos))
+}
+
+function Scroll-HorzMini {
+    param([hashtable]$ScrollObj, [int]$Delta)
+    $ScrollObj.Offset = [Math]::Min($ScrollObj.MaxScroll, [Math]::Max(0, $ScrollObj.Offset + $Delta))
+    Update-HorzMiniThumb $ScrollObj
+}
+
+function Layout-HorzMiniRows {
+    param([hashtable]$ScrollObj, [object[]]$Rows)
+    $vp     = $ScrollObj.Viewport
+    $ct     = $ScrollObj.Content
+    $availW = [Math]::Max(60, $vp.ClientSize.Width - 8)
+    $ct.Width = $vp.ClientSize.Width
+    $y = 4
+    $ct.SuspendLayout()
+    foreach ($row in $Rows) {
+        $row.Panel.Left  = 4
+        $row.Panel.Top   = $y
+        $row.Panel.Width = $availW
+
+        $cb = $row.CopyButton
+        $cbW = if ($null -ne $script:copyIcon) { 14 } else { 54 }
+        $cbH = if ($null -ne $script:copyIcon) { 12 } else { 24 }
+        $cb.Width  = $cbW; $cb.Height = $cbH
+        $cb.Left   = $availW - $cbW - 8
+        $cb.Top    = 7 + [int]((18 - $cbH) / 2)
+
+        $row.Title.Left   = 8
+        $row.Title.Top    = 7
+        $row.Title.Height = 18
+        $row.Title.Width  = [Math]::Max(40, $cb.Left - 14)
+
+        $textW  = [Math]::Max(40, $availW - 16)
+        # AutoSize trick: let the label measure itself accurately at the given width,
+        # then read the real height. This handles path-separator word breaks that
+        # TextRenderer.MeasureText underestimates.
+        $row.ValueLabel.MinimumSize = New-Object System.Drawing.Size $textW, 0
+        $row.ValueLabel.MaximumSize = New-Object System.Drawing.Size $textW, 0
+        $row.ValueLabel.AutoSize    = $true
+        $row.ValueLabel.PerformLayout()
+        $measuredH = [Math]::Max(18, $row.ValueLabel.Height)
+        $row.ValueLabel.AutoSize = $false
+        $row.ValueLabel.Left   = 8
+        $row.ValueLabel.Top    = 30
+        $row.ValueLabel.Width  = $textW
+        $row.ValueLabel.Height = $measuredH + 4
+
+        $rowH = [Math]::Max(52, 30 + $row.ValueLabel.Height + 12)
+        $row.Panel.Height = $rowH
+        $y += $rowH + 6
+    }
+    $totalH = $y + 4
+    $ct.Height = $totalH
+    $ScrollObj.ContentH  = $totalH
+    $ScrollObj.MaxScroll = [Math]::Max(0, $totalH - $vp.ClientSize.Height)
+    if ($ScrollObj.Offset -gt $ScrollObj.MaxScroll) { $ScrollObj.Offset = $ScrollObj.MaxScroll }
+    Update-HorzMiniThumb $ScrollObj
+    $ct.ResumeLayout()
+}
+
+# ── Custom scroll helpers for prompt RichTextBoxes ────────────────────────────
+# These replace the system scrollbar (ScrollBars='None' on RTB) with the same
+# dark custom track used in vertical mode.
+
+function Get-RtbScrollInfo {
+    param($Rtb)
+    if (-not $Rtb.IsHandleCreated -or $Rtb.ClientSize.Height -le 0 -or $Rtb.TextLength -eq 0) {
+        return @{ First=0; Total=1; Visible=1; Scrollable=$false }
+    }
+    try {
+        $firstLine  = $Rtb.GetLineFromCharIndex($Rtb.GetCharIndexFromPosition([System.Drawing.Point]::Empty))
+        $totalLines = [Math]::Max(1, $Rtb.GetLineFromCharIndex($Rtb.TextLength) + 1)
+        $lineH      = [Math]::Max(1, [System.Windows.Forms.TextRenderer]::MeasureText('Wy', $Rtb.Font).Height)
+        $visLines   = [Math]::Max(1, [int]($Rtb.ClientSize.Height / $lineH))
+        return @{ First=$firstLine; Total=$totalLines; Visible=$visLines; Scrollable=($totalLines -gt $visLines) }
+    } catch {
+        return @{ First=0; Total=1; Visible=1; Scrollable=$false }
+    }
+}
+
+function Update-RtbThumb {
+    param($Rtb, $Track, $Thumb)
+    $info = Get-RtbScrollInfo $Rtb
+    $Track.Visible = $info.Scrollable
+    if (-not $info.Scrollable) { return }
+    $trackH    = [Math]::Max(1, $Track.ClientSize.Height)
+    $scrollable = $info.Total - $info.Visible
+    $ratio     = [double]$info.Visible / [double]$info.Total
+    $thumbH    = [Math]::Max(20, [int]($trackH * $ratio))
+    if ($thumbH -ge $trackH) { $Track.Visible = $false; return }
+    $range = [Math]::Max(1, $trackH - $thumbH)
+    $pos   = if ($scrollable -gt 0) { [int](([double]$info.First / $scrollable) * $range) } else { 0 }
+    $Thumb.Height = $thumbH
+    $Thumb.Top    = [Math]::Min($range, [Math]::Max(0, $pos))
+}
+
+# EM_LINESCROLL (0x00B6): positive = scroll down N lines, negative = scroll up.
+function Scroll-RtbLines {
+    param($Rtb, [int]$Lines, $Track, $Thumb)
+    [void][Win32]::SendMessage($Rtb.Handle, 0x00B6, [IntPtr]::Zero, [IntPtr]$Lines)
+    Update-RtbThumb $Rtb $Track $Thumb
+}
+
+# ── End custom scroll helpers ─────────────────────────────────────────────────
+
+# Columns 1-2: prompt RichTextBoxes with header copy button
+$horzCol1 = New-HorzCol 'Positive Prompt' 1
+$horzPosRtb = New-HorzRtb
+$script:horzPosRtb = $horzPosRtb
+
+$posTrack = New-Object System.Windows.Forms.Panel
+$posTrack.Dock = 'Right'; $posTrack.Width = 10; $posTrack.BackColor = $scrollTrackBg; $posTrack.Visible = $false
+$posThumb = New-Object System.Windows.Forms.Panel
+$posThumb.Left = 1; $posThumb.Width = 8; $posThumb.Height = 40; $posThumb.BackColor = $scrollThumbBg
+$posTrack.Controls.Add($posThumb)
+$horzCol1.Scroll.Controls.Add($posTrack)
+$horzCol1.Scroll.Controls.Add($horzPosRtb)
+$posTrack.BringToFront()
+Add-HorzCopyBtn $horzCol1.Header $horzPosRtb
+
+$posThumb.Add_MouseEnter({ $posThumb.BackColor = $scrollThumbHoverBg })
+$posThumb.Add_MouseLeave({ if (-not $script:horzPosDragging) { $posThumb.BackColor = $scrollThumbBg } })
+$posThumb.Add_MouseDown({
+    param($s, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $script:horzPosDragging = $true
+        $script:horzPosDragY    = [System.Windows.Forms.Cursor]::Position.Y
+        $script:horzPosDragLine = (Get-RtbScrollInfo $horzPosRtb).First
+        $posThumb.Capture = $true; $posThumb.BackColor = $scrollThumbHoverBg
+    }
+})
+$posThumb.Add_MouseMove({
+    if (-not $script:horzPosDragging) { return }
+    $info = Get-RtbScrollInfo $horzPosRtb
+    $scrollable = [Math]::Max(1, $info.Total - $info.Visible)
+    $range  = [Math]::Max(1, $posTrack.ClientSize.Height - $posThumb.Height)
+    $dy     = [System.Windows.Forms.Cursor]::Position.Y - $script:horzPosDragY
+    $target = $script:horzPosDragLine + [int](($dy / $range) * $scrollable)
+    $delta  = $target - $info.First
+    if ($delta -ne 0) { [void][Win32]::SendMessage($horzPosRtb.Handle, 0x00B6, [IntPtr]::Zero, [IntPtr]$delta) }
+    Update-RtbThumb $horzPosRtb $posTrack $posThumb
+})
+$posThumb.Add_MouseUp({
+    if ($script:horzPosDragging) { $script:horzPosDragging = $false; $posThumb.Capture = $false; $posThumb.BackColor = $scrollThumbBg }
+})
+$horzPosRtb.Add_MouseWheel({
+    param($s, $e)
+    $lines = [Math]::Max(1, [int](3 * [Math]::Abs($e.Delta) / 120))
+    $dir = if ($e.Delta -lt 0) { $lines } else { -$lines }
+    Scroll-RtbLines $horzPosRtb $dir $posTrack $posThumb
+})
+$horzPosRtb.Add_KeyUp({ Update-RtbThumb $horzPosRtb $posTrack $posThumb })
+$horzCol1.Scroll.Add_SizeChanged({ Update-RtbThumb $horzPosRtb $posTrack $posThumb })
+
+$horzCol2 = New-HorzCol 'Negative Prompt' 2
+$horzNegRtb = New-HorzRtb
+$script:horzNegRtb = $horzNegRtb
+
+$negTrack = New-Object System.Windows.Forms.Panel
+$negTrack.Dock = 'Right'; $negTrack.Width = 10; $negTrack.BackColor = $scrollTrackBg; $negTrack.Visible = $false
+$negThumb = New-Object System.Windows.Forms.Panel
+$negThumb.Left = 1; $negThumb.Width = 8; $negThumb.Height = 40; $negThumb.BackColor = $scrollThumbBg
+$negTrack.Controls.Add($negThumb)
+$horzCol2.Scroll.Controls.Add($negTrack)
+$horzCol2.Scroll.Controls.Add($horzNegRtb)
+$negTrack.BringToFront()
+Add-HorzCopyBtn $horzCol2.Header $horzNegRtb
+
+$negThumb.Add_MouseEnter({ $negThumb.BackColor = $scrollThumbHoverBg })
+$negThumb.Add_MouseLeave({ if (-not $script:horzNegDragging) { $negThumb.BackColor = $scrollThumbBg } })
+$negThumb.Add_MouseDown({
+    param($s, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $script:horzNegDragging = $true
+        $script:horzNegDragY    = [System.Windows.Forms.Cursor]::Position.Y
+        $script:horzNegDragLine = (Get-RtbScrollInfo $horzNegRtb).First
+        $negThumb.Capture = $true; $negThumb.BackColor = $scrollThumbHoverBg
+    }
+})
+$negThumb.Add_MouseMove({
+    if (-not $script:horzNegDragging) { return }
+    $info = Get-RtbScrollInfo $horzNegRtb
+    $scrollable = [Math]::Max(1, $info.Total - $info.Visible)
+    $range  = [Math]::Max(1, $negTrack.ClientSize.Height - $negThumb.Height)
+    $dy     = [System.Windows.Forms.Cursor]::Position.Y - $script:horzNegDragY
+    $target = $script:horzNegDragLine + [int](($dy / $range) * $scrollable)
+    $delta  = $target - $info.First
+    if ($delta -ne 0) { [void][Win32]::SendMessage($horzNegRtb.Handle, 0x00B6, [IntPtr]::Zero, [IntPtr]$delta) }
+    Update-RtbThumb $horzNegRtb $negTrack $negThumb
+})
+$negThumb.Add_MouseUp({
+    if ($script:horzNegDragging) { $script:horzNegDragging = $false; $negThumb.Capture = $false; $negThumb.BackColor = $scrollThumbBg }
+})
+$horzNegRtb.Add_MouseWheel({
+    param($s, $e)
+    $lines = [Math]::Max(1, [int](3 * [Math]::Abs($e.Delta) / 120))
+    $dir = if ($e.Delta -lt 0) { $lines } else { -$lines }
+    Scroll-RtbLines $horzNegRtb $dir $negTrack $negThumb
+})
+$horzNegRtb.Add_KeyUp({ Update-RtbThumb $horzNegRtb $negTrack $negThumb })
+$horzCol2.Scroll.Add_SizeChanged({ Update-RtbThumb $horzNegRtb $negTrack $negThumb })
+
+# Column 3: Info — pre-built mini-rows with custom dark scroll track
+$horzCol3 = New-HorzCol 'Info' 3
+
+$infoTrack = New-Object System.Windows.Forms.Panel
+$infoTrack.Dock = 'Right'; $infoTrack.Width = 10; $infoTrack.BackColor = $scrollTrackBg; $infoTrack.Visible = $false
+$infoThumb = New-Object System.Windows.Forms.Panel
+$infoThumb.Left = 1; $infoThumb.Width = 8; $infoThumb.Height = 40; $infoThumb.BackColor = $scrollThumbBg
+$infoTrack.Controls.Add($infoThumb)
+$horzCol3.Scroll.Controls.Add($infoTrack)
+
+$infoViewport = New-Object System.Windows.Forms.Panel
+$infoViewport.Dock = 'Fill'; $infoViewport.BackColor = $rowBg
+$horzCol3.Scroll.Controls.Add($infoViewport)
+$infoTrack.BringToFront()
+
+$infoContent = New-Object System.Windows.Forms.Panel
+$infoContent.Left = 0; $infoContent.Top = 0; $infoContent.BackColor = $rowBg
+$infoViewport.Controls.Add($infoContent)
+
+$script:horzInfoScroll.Track = $infoTrack; $script:horzInfoScroll.Thumb = $infoThumb
+$script:horzInfoScroll.Viewport = $infoViewport; $script:horzInfoScroll.Content = $infoContent
+
+[void]$script:horzInfoRows.Add((New-HorzMiniRow 'Seed'         $infoContent))
+[void]$script:horzInfoRows.Add((New-HorzMiniRow 'Resolution'   $infoContent))
+[void]$script:horzInfoRows.Add((New-HorzMiniRow 'Model'        $infoContent))
+[void]$script:horzInfoRows.Add((New-HorzMiniRow 'Text Encoder' $infoContent))
+
+$infoThumb.Add_MouseEnter({ $infoThumb.BackColor = $scrollThumbHoverBg })
+$infoThumb.Add_MouseLeave({ if (-not $script:horzInfoScroll.Dragging) { $infoThumb.BackColor = $scrollThumbBg } })
+$infoThumb.Add_MouseDown({
+    param($s, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $script:horzInfoScroll.Dragging   = $true
+        $script:horzInfoScroll.DragY      = [System.Windows.Forms.Cursor]::Position.Y
+        $script:horzInfoScroll.DragOffset = $script:horzInfoScroll.Offset
+        $infoThumb.Capture = $true; $infoThumb.BackColor = $scrollThumbHoverBg
+    }
+})
+$infoThumb.Add_MouseMove({
+    if (-not $script:horzInfoScroll.Dragging) { return }
+    $range = [Math]::Max(1, $infoTrack.ClientSize.Height - $infoThumb.Height)
+    $dy    = [System.Windows.Forms.Cursor]::Position.Y - $script:horzInfoScroll.DragY
+    $script:horzInfoScroll.Offset = [Math]::Min($script:horzInfoScroll.MaxScroll, [Math]::Max(0,
+        $script:horzInfoScroll.DragOffset + [int](($dy / $range) * [Math]::Max(1, $script:horzInfoScroll.MaxScroll))))
+    Update-HorzMiniThumb $script:horzInfoScroll
+})
+$infoThumb.Add_MouseUp({
+    if ($script:horzInfoScroll.Dragging) { $script:horzInfoScroll.Dragging = $false; $infoThumb.Capture = $false; $infoThumb.BackColor = $scrollThumbBg }
+})
+$infoViewport.Add_MouseWheel({
+    param($s, $e); $delta = if ($e.Delta -lt 0) { 72 } else { -72 }; Scroll-HorzMini $script:horzInfoScroll $delta
+})
+$infoContent.Add_MouseWheel({
+    param($s, $e); $delta = if ($e.Delta -lt 0) { 72 } else { -72 }; Scroll-HorzMini $script:horzInfoScroll $delta
+})
+foreach ($row in $script:horzInfoRows) {
+    $row.Panel.Tag = $script:horzInfoScroll
+    $row.Panel.Add_MouseWheel({ param($s,$e); $d = if ($e.Delta -lt 0) { 72 } else { -72 }; Scroll-HorzMini $s.Tag $d })
+    $row.ValueLabel.Tag = $script:horzInfoScroll
+    $row.ValueLabel.Add_MouseWheel({ param($s,$e); $d = if ($e.Delta -lt 0) { 72 } else { -72 }; Scroll-HorzMini $s.Tag $d })
+}
+$horzCol3.Scroll.Add_SizeChanged({ Layout-HorzMiniRows $script:horzInfoScroll $script:horzInfoRows.ToArray() })
+
+# Column 4: Sampler — pre-built mini-rows with custom dark scroll track
+$horzCol4 = New-HorzCol 'Sampler' 4
+
+$sampTrack = New-Object System.Windows.Forms.Panel
+$sampTrack.Dock = 'Right'; $sampTrack.Width = 10; $sampTrack.BackColor = $scrollTrackBg; $sampTrack.Visible = $false
+$sampThumb = New-Object System.Windows.Forms.Panel
+$sampThumb.Left = 1; $sampThumb.Width = 8; $sampThumb.Height = 40; $sampThumb.BackColor = $scrollThumbBg
+$sampTrack.Controls.Add($sampThumb)
+$horzCol4.Scroll.Controls.Add($sampTrack)
+
+$sampViewport = New-Object System.Windows.Forms.Panel
+$sampViewport.Dock = 'Fill'; $sampViewport.BackColor = $rowBg
+$horzCol4.Scroll.Controls.Add($sampViewport)
+$sampTrack.BringToFront()
+
+$sampContent = New-Object System.Windows.Forms.Panel
+$sampContent.Left = 0; $sampContent.Top = 0; $sampContent.BackColor = $rowBg
+$sampViewport.Controls.Add($sampContent)
+
+$script:horzSampScroll.Track = $sampTrack; $script:horzSampScroll.Thumb = $sampThumb
+$script:horzSampScroll.Viewport = $sampViewport; $script:horzSampScroll.Content = $sampContent
+
+[void]$script:horzSampRows.Add((New-HorzMiniRow "LoRA's"    $sampContent))
+[void]$script:horzSampRows.Add((New-HorzMiniRow 'Sampler'   $sampContent))
+[void]$script:horzSampRows.Add((New-HorzMiniRow 'Scheduler' $sampContent))
+[void]$script:horzSampRows.Add((New-HorzMiniRow 'Steps'     $sampContent))
+[void]$script:horzSampRows.Add((New-HorzMiniRow 'CFG'       $sampContent))
+
+$sampThumb.Add_MouseEnter({ $sampThumb.BackColor = $scrollThumbHoverBg })
+$sampThumb.Add_MouseLeave({ if (-not $script:horzSampScroll.Dragging) { $sampThumb.BackColor = $scrollThumbBg } })
+$sampThumb.Add_MouseDown({
+    param($s, $e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $script:horzSampScroll.Dragging   = $true
+        $script:horzSampScroll.DragY      = [System.Windows.Forms.Cursor]::Position.Y
+        $script:horzSampScroll.DragOffset = $script:horzSampScroll.Offset
+        $sampThumb.Capture = $true; $sampThumb.BackColor = $scrollThumbHoverBg
+    }
+})
+$sampThumb.Add_MouseMove({
+    if (-not $script:horzSampScroll.Dragging) { return }
+    $range = [Math]::Max(1, $sampTrack.ClientSize.Height - $sampThumb.Height)
+    $dy    = [System.Windows.Forms.Cursor]::Position.Y - $script:horzSampScroll.DragY
+    $script:horzSampScroll.Offset = [Math]::Min($script:horzSampScroll.MaxScroll, [Math]::Max(0,
+        $script:horzSampScroll.DragOffset + [int](($dy / $range) * [Math]::Max(1, $script:horzSampScroll.MaxScroll))))
+    Update-HorzMiniThumb $script:horzSampScroll
+})
+$sampThumb.Add_MouseUp({
+    if ($script:horzSampScroll.Dragging) { $script:horzSampScroll.Dragging = $false; $sampThumb.Capture = $false; $sampThumb.BackColor = $scrollThumbBg }
+})
+$sampViewport.Add_MouseWheel({
+    param($s, $e); $delta = if ($e.Delta -lt 0) { 72 } else { -72 }; Scroll-HorzMini $script:horzSampScroll $delta
+})
+$sampContent.Add_MouseWheel({
+    param($s, $e); $delta = if ($e.Delta -lt 0) { 72 } else { -72 }; Scroll-HorzMini $script:horzSampScroll $delta
+})
+foreach ($row in $script:horzSampRows) {
+    $row.Panel.Tag = $script:horzSampScroll
+    $row.Panel.Add_MouseWheel({ param($s,$e); $d = if ($e.Delta -lt 0) { 72 } else { -72 }; Scroll-HorzMini $s.Tag $d })
+    $row.ValueLabel.Tag = $script:horzSampScroll
+    $row.ValueLabel.Add_MouseWheel({ param($s,$e); $d = if ($e.Delta -lt 0) { 72 } else { -72 }; Scroll-HorzMini $s.Tag $d })
+}
+$horzCol4.Scroll.Add_SizeChanged({ Layout-HorzMiniRows $script:horzSampScroll $script:horzSampRows.ToArray() })
+
+function Update-HorzNavBar {
+    $show = $script:siblingPngs.Count -gt 1
+    $script:horzPrevArrow.Visible  = $show
+    $script:horzNextArrow.Visible  = $show
+    $script:horzImgCounter.Visible = $show
+    $horzNavBar.Visible = $show
+    $horzNavBar.Height  = if ($show) { 24 } else { 0 }
+    if ($show) {
+        $cnt = if ($script:siblingIndex -ge 0) { "$($script:siblingIndex + 1) / $($script:siblingPngs.Count)" } else { "? / $($script:siblingPngs.Count)" }
+        $script:horzImgCounter.Text = $cnt
+    }
+}
+
+function Apply-LayoutMode {
+    param([string]$Mode)
+    if ($Mode -eq $script:layoutMode) { return }
+
+    # Remember the vertical-mode window size before switching away from it
+    if ($script:layoutMode -eq 'Vertical') {
+        $script:vertWidth  = $form.Width
+        $script:vertHeight = $form.Height
+    }
+
+    $script:layoutMode = $Mode
+
+    if ($Mode -eq 'Horizontal') {
+        $scrollHost.Visible    = $false
+        $horzContainer.Visible = $true
+        if ($null -ne $script:horzIconV) { $layoutBtn.Image = $script:horzIconV; $layoutBtn.Text = '' }
+        else { $layoutBtn.Image = $null; $layoutBtn.Text = 'V' }
+        $toolTip.SetToolTip($layoutBtn, 'Switch to Vertical')
+        $form.MinimumSize = New-Object System.Drawing.Size -ArgumentList 640, 280
+        # Default to a wide layout if the window is too narrow for 5 columns
+        if ($form.Width -lt 900) { $form.Width = 1100; $form.Height = 430 }
+    } else {
+        $scrollHost.Visible    = $true
+        $horzContainer.Visible = $false
+        if ($null -ne $script:horzIconH) { $layoutBtn.Image = $script:horzIconH; $layoutBtn.Text = '' }
+        else { $layoutBtn.Image = $null; $layoutBtn.Text = 'H' }
+        $toolTip.SetToolTip($layoutBtn, 'Switch to Horizontal')
+        $form.MinimumSize = New-Object System.Drawing.Size -ArgumentList 300, 420
+        if ($script:vertWidth -gt 0) { $form.Width = $script:vertWidth; $form.Height = $script:vertHeight }
+        else { $form.Width = 430; $form.Height = 760 }
+    }
+
+    $script:stateDirty = $true
+    $stateSaveTimer.Stop(); $stateSaveTimer.Start()
+    if (-not [string]::IsNullOrWhiteSpace($script:currentFile)) { Load-FileIntoPanel $script:currentFile }
+}
+
+# ── End horizontal layout setup ───────────────────────────────────────────────
+
 function Layout-MetaRows {
+    if ($script:layoutMode -eq 'Horizontal') { return }
     $availableWidth = [Math]::Max(265, $viewport.ClientSize.Width - 8)
     $contentPanel.SuspendLayout()
     $y = 4
@@ -1123,34 +1855,83 @@ function Load-FileIntoPanel {
         $meta = Get-ComfyMetaJson $FilePath
         $script:lastMetaText = ConvertTo-PlainRows $meta
 
-        Add-MetaRow 'Positive Prompt' ([string]$meta.PositivePrompt) $true
+        if ($script:layoutMode -eq 'Horizontal') {
+            # ── Horizontal path ──────────────────────────────────────────────
+            # Image is already set by Set-PanelImage above
+            Update-HorzNavBar
 
-        $rawNeg = [string]$meta.NegativePrompt
-        if (-not [string]::IsNullOrWhiteSpace($rawNeg)) { Add-MetaRow 'Negative Prompt' $rawNeg $true }
+            $script:horzPosRtb.Text = Display-Value ([string]$meta.PositivePrompt)
+            [void][Win32]::SendMessage($script:horzPosRtb.Handle, 0x00B6, [IntPtr]::Zero, [IntPtr](-99999))
+            Update-RtbThumb $script:horzPosRtb $posTrack $posThumb
 
-        Add-MetaRow 'Seed' ([string]$meta.Seed) $false
-        Add-MetaRow 'Resolution' ([string]$meta.Resolution) $false
+            $negText = [string]$meta.NegativePrompt
+            $hasNeg  = -not [string]::IsNullOrWhiteSpace($negText)
+            if ($hasNeg) {
+                $script:horzNegRtb.Text = $negText
+                $horzCol2.Panel.Visible = $true
+                $horzTable.ColumnStyles[2].SizeType = [System.Windows.Forms.SizeType]::Percent
+                $horzTable.ColumnStyles[2].Width    = 22
+                [void][Win32]::SendMessage($script:horzNegRtb.Handle, 0x00B6, [IntPtr]::Zero, [IntPtr](-99999))
+                Update-RtbThumb $script:horzNegRtb $negTrack $negThumb
+            } else {
+                $script:horzNegRtb.Text = ''
+                $horzCol2.Panel.Visible = $false
+                $horzTable.ColumnStyles[2].SizeType = [System.Windows.Forms.SizeType]::Absolute
+                $horzTable.ColumnStyles[2].Width    = 0
+            }
 
-        $rawLoras = [string]$meta.LoRAs
-        if (-not [string]::IsNullOrWhiteSpace($rawLoras)) { Add-MetaRow "LoRA's" $rawLoras $false }
+            # Info column — update each mini-row's value label then re-layout
+            $script:horzInfoRows[0].ValueLabel.Text = Display-Value ([string]$meta.Seed)
+            $script:horzInfoRows[1].ValueLabel.Text = Display-Value ([string]$meta.Resolution)
+            $script:horzInfoRows[2].ValueLabel.Text = Display-Value ([string]$meta.Model)
+            $script:horzInfoRows[3].ValueLabel.Text = Display-Value ([string]$meta.TextEncoder)
+            Layout-HorzMiniRows $script:horzInfoScroll $script:horzInfoRows.ToArray()
 
-        Add-MetaRow 'Model' ([string]$meta.Model) $false
+            # Sampler column — same pattern
+            $script:horzSampRows[0].ValueLabel.Text = Display-Value ([string]$meta.LoRAs)
+            $script:horzSampRows[1].ValueLabel.Text = Display-Value ([string]$meta.Sampler)
+            $script:horzSampRows[2].ValueLabel.Text = Display-Value ([string]$meta.Scheduler)
+            $script:horzSampRows[3].ValueLabel.Text = Display-Value ([string]$meta.Steps)
+            $script:horzSampRows[4].ValueLabel.Text = Display-Value ([string]$meta.CFG)
+            Layout-HorzMiniRows $script:horzSampScroll $script:horzSampRows.ToArray()
+        } else {
+            # ── Vertical path (original) ─────────────────────────────────────
+            Add-MetaRow 'Positive Prompt' ([string]$meta.PositivePrompt) $true
 
-        $rawEnc = [string]$meta.TextEncoder
-        if (-not [string]::IsNullOrWhiteSpace($rawEnc)) { Add-MetaRow 'Text Encoder' $rawEnc $false }
+            $rawNeg = [string]$meta.NegativePrompt
+            if (-not [string]::IsNullOrWhiteSpace($rawNeg)) { Add-MetaRow 'Negative Prompt' $rawNeg $true }
 
-        Add-MetaRow 'Sampler' ([string]$meta.Sampler) $false
-        Add-MetaRow 'Scheduler' ([string]$meta.Scheduler) $false
-        Add-MetaRow 'Steps' ([string]$meta.Steps) $false
-        Add-MetaRow 'CFG' ([string]$meta.CFG) $false
-        Layout-MetaRows
+            Add-MetaRow 'Seed' ([string]$meta.Seed) $false
+            Add-MetaRow 'Resolution' ([string]$meta.Resolution) $false
+
+            $rawLoras = [string]$meta.LoRAs
+            if (-not [string]::IsNullOrWhiteSpace($rawLoras)) { Add-MetaRow "LoRA's" $rawLoras $false }
+
+            Add-MetaRow 'Model' ([string]$meta.Model) $false
+
+            $rawEnc = [string]$meta.TextEncoder
+            if (-not [string]::IsNullOrWhiteSpace($rawEnc)) { Add-MetaRow 'Text Encoder' $rawEnc $false }
+
+            Add-MetaRow 'Sampler' ([string]$meta.Sampler) $false
+            Add-MetaRow 'Scheduler' ([string]$meta.Scheduler) $false
+            Add-MetaRow 'Steps' ([string]$meta.Steps) $false
+            Add-MetaRow 'CFG' ([string]$meta.CFG) $false
+            Layout-MetaRows
+        }
+
         $script:loadedStatusText = 'Loaded: ' + (Get-Date).ToString('HH:mm:ss')
         $statusLabel.Text = $script:loadedStatusText
         Update-ImageBtnState
     } catch {
-        Add-MetaRow 'Error' $_.Exception.Message $true
+        if ($script:layoutMode -eq 'Horizontal') {
+            $script:horzPosRtb.Text = 'Error: ' + $_.Exception.Message
+            $script:horzNegRtb.Text = ''
+            foreach ($row in ($script:horzInfoRows + $script:horzSampRows)) { $row.ValueLabel.Text = 'N/A' }
+        } else {
+            Add-MetaRow 'Error' $_.Exception.Message $true
+            Layout-MetaRows
+        }
         $script:lastMetaText = 'Error: ' + $_.Exception.Message
-        Layout-MetaRows
         $statusLabel.Text = 'Error reading metadata'
     }
 }
@@ -1190,6 +1971,7 @@ $toolbar.Add_SizeChanged({
         $minimizeButton.Left = [Math]::Max($aboutBtn.Right + 4, $closeButton.Left - $minimizeButton.Width - 4)
         $collapseBtn.Left    = [Math]::Max($aboutBtn.Right + 4, $minimizeButton.Left - $collapseBtn.Width - 4)
         $pinBtn.Left         = [Math]::Max($aboutBtn.Right + 4, $collapseBtn.Left - $pinBtn.Width - 4)
+        $layoutBtn.Left      = [Math]::Max($aboutBtn.Right + 4, $pinBtn.Left - $layoutBtn.Width - 4)
     } catch {}
 })
 
@@ -1271,6 +2053,8 @@ $form.Add_FormClosed({
     try { if ($null -ne $script:openIcon)       { $script:openIcon.Dispose()       } } catch {}
     try { if ($null -ne $script:pinIconNormal)  { $script:pinIconNormal.Dispose()  } } catch {}
     try { if ($null -ne $script:pinIconDimmed)  { $script:pinIconDimmed.Dispose()  } } catch {}
+    try { if ($null -ne $script:horzIconH)      { $script:horzIconH.Dispose()      } } catch {}
+    try { if ($null -ne $script:horzIconV)      { $script:horzIconV.Dispose()      } } catch {}
     try { if ($null -ne $form.Icon)             { $form.Icon.Dispose()             } } catch {}
     try { $statusRevertTimer.Stop(); $statusRevertTimer.Dispose() } catch {}
     try { $toolTip.Dispose() } catch {}
@@ -1286,6 +2070,17 @@ Add-DropTarget $viewport
 Add-DropTarget $contentPanel
 Add-DropTarget $imagePanel
 Add-DropTarget $imageBox
+
+# Restore layout mode from saved state without triggering a file reload
+# (the file hasn't been set yet — that happens immediately below).
+if ($script:layoutMode -eq 'Horizontal') {
+    $scrollHost.Visible    = $false
+    $horzContainer.Visible = $true
+    if ($null -ne $script:horzIconV) { $layoutBtn.Image = $script:horzIconV; $layoutBtn.Text = '' }
+    else { $layoutBtn.Image = $null; $layoutBtn.Text = 'V' }
+    $toolTip.SetToolTip($layoutBtn, 'Switch to Vertical')
+    $form.MinimumSize = New-Object System.Drawing.Size -ArgumentList 640, 280
+}
 
 if (-not [string]::IsNullOrWhiteSpace($FilePath) -and (Test-Path -LiteralPath $FilePath)) {
     Load-FileIntoPanel $FilePath

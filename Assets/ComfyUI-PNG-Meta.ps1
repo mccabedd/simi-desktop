@@ -1,6 +1,6 @@
 <#
 ComfyUI-PNG-Meta.ps1
-v3.7
+v3.8
 Extracts useful ComfyUI generation metadata from PNG tEXt/iTXt/zTXt chunks.
 Outputs HTML with per-row copy buttons, plain text, JSON, or a single field for Directory Opus columns.
 #>
@@ -1195,10 +1195,10 @@ function Fill-CoreFieldsFromAnyPromptNode {
         $Result.Seed = Normalize-SeedString (Find-CoreValueFallback $Prompt $Nodes @('seed','noise_seed','rand_seed','random_seed') '(?i)(sampler|sampling|ksampler|seed|noise|slider|pipe|efficiency|easy|no8d)')
     }
     if (Is-BlankField $Result.Steps) {
-        $Result.Steps = Find-CoreValueFallback $Prompt $Nodes @('steps','step','total_steps','sample_steps','num_steps') '(?i)(sampler|sampling|ksampler|steps|slider|pipe|efficiency|easy|no8d)'
+        $Result.Steps = Find-CoreValueFallback $Prompt $Nodes @('steps','step','total_steps','sample_steps','num_steps','num_inference_steps') '(?i)(sampler|sampling|ksampler|steps|slider|pipe|efficiency|easy|no8d)'
     }
     if (Is-BlankField $Result.CFG) {
-        $Result.CFG = Find-CoreValueFallback $Prompt $Nodes @('cfg','cfg_scale','cfgscale','guidance','guidance_scale') '(?i)(sampler|sampling|ksampler|cfg|guidance|slider|pipe|efficiency|easy|no8d)'
+        $Result.CFG = Find-CoreValueFallback $Prompt $Nodes @('cfg','cfg_scale','cfgscale','guidance','guidance_scale','distilled_cfg_scale') '(?i)(sampler|sampling|ksampler|cfg|guidance|slider|pipe|efficiency|easy|no8d)'
     }
     if (Is-BlankField $Result.Sampler) {
         $Result.Sampler = Find-CoreValueFallback $Prompt $Nodes @('sampler_name','sampler','samplername') '(?i)(sampler|sampling|ksampler|slider|pipe|efficiency|easy|no8d)'
@@ -1211,13 +1211,13 @@ function Fill-CoreFieldsFromAnyPromptNode {
 function Is-KnownSamplerName {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
-    return ($Text -match '(?i)^(euler|euler_ancestral|euler_a|heun|dpm|dpm_|dpmpp|dpm\+\+|lms|ddim|uni_pc|uni_pc_bh2|lcm|ipndm|deis|ddpm|restart|res_multistep|sa_solver|gradient_estimation).*$')
+    return ($Text -match '(?i)^(euler|euler_ancestral|euler_a|heun|heunpp2|dpm|dpm_|dpmpp|dpm\+\+|lms|ddim|uni_pc|uni_pc_bh2|lcm|ipndm|deis|ddpm|restart|res_|sa_solver|gradient_estimation|tcd|ttm_jvp|flow_dpm|seeds).*$')
 }
 
 function Is-KnownSchedulerName {
     param([string]$Text)
     if ([string]::IsNullOrWhiteSpace($Text)) { return $false }
-    return ($Text -match '(?i)^(normal|karras|exponential|sgm_uniform|simple|ddim_uniform|beta|linear_quadratic|kl_optimal|turbo|ays|align.*steps|gits|polyexponential|vp|linear|cosine).*$')
+    return ($Text -match '(?i)^(normal|karras|exponential|sgm_uniform|simple|ddim_uniform|beta|linear_quadratic|kl_optimal|turbo|ays|align.*steps|gits|polyexponential|vp|linear|cosine|laplace|discrete_flow).*$')
 }
 
 function Is-NumericLike {
@@ -1302,8 +1302,8 @@ function Fill-CoreFieldsFromWorkflowWidgets {
         if ($null -eq $widgets -or -not ($widgets -is [System.Array]) -or $widgets.Length -eq 0) { continue }
 
         if (Is-BlankField $Result.Seed) { Set-IfBlank $Result 'Seed' (Get-WorkflowWidgetNameMapValue $node @('seed','noise_seed','rand_seed','random_seed')) }
-        if (Is-BlankField $Result.Steps) { Set-IfBlank $Result 'Steps' (Get-WorkflowWidgetNameMapValue $node @('steps','step','total_steps','sample_steps','num_steps')) }
-        if (Is-BlankField $Result.CFG) { Set-IfBlank $Result 'CFG' (Get-WorkflowWidgetNameMapValue $node @('cfg','cfg_scale','cfgscale','guidance','guidance_scale')) }
+        if (Is-BlankField $Result.Steps) { Set-IfBlank $Result 'Steps' (Get-WorkflowWidgetNameMapValue $node @('steps','step','total_steps','sample_steps','num_steps','num_inference_steps')) }
+        if (Is-BlankField $Result.CFG) { Set-IfBlank $Result 'CFG' (Get-WorkflowWidgetNameMapValue $node @('cfg','cfg_scale','cfgscale','guidance','guidance_scale','distilled_cfg_scale')) }
         if (Is-BlankField $Result.Sampler) { Set-IfBlank $Result 'Sampler' (Get-WorkflowWidgetNameMapValue $node @('sampler_name','sampler','samplername')) }
         if (Is-BlankField $Result.Scheduler) { Set-IfBlank $Result 'Scheduler' (Get-WorkflowWidgetNameMapValue $node @('scheduler','scheduler_name','schedule','schedule_type','scheduler_type','sched','sched')) }
 
@@ -1545,6 +1545,34 @@ function Parse-ComfyPrompt {
 
         $posRef = Get-RefId (Get-PropValue $i 'positive')
         $negRef = Get-RefId (Get-PropValue $i 'negative')
+
+        # Handle samplers that delegate conditioning via a guider node.
+        # e.g. SamplerCustomAdvanced → CFGGuider (has positive/negative)
+        #                            → BasicGuider (has conditioning only, FLUX style)
+        # Without this, posRef/negRef are both empty and the last-resort CLIPTextEncode sweep
+        # bundles all text nodes into PositivePrompt.
+        if ([string]::IsNullOrWhiteSpace($posRef) -and [string]::IsNullOrWhiteSpace($negRef)) {
+            $guiderVal = Get-PropValue $i 'guider'
+            if ($null -ne $guiderVal -and (Is-RefArray $guiderVal)) {
+                $guiderNode = Get-NodeById $Prompt (Get-RefId $guiderVal)
+                if ($null -ne $guiderNode) {
+                    $gi = Get-PropValue $guiderNode 'inputs'
+                    if ($null -ne $gi) {
+                        $posRef = Get-RefId (Get-PropValue $gi 'positive')
+                        $negRef = Get-RefId (Get-PropValue $gi 'negative')
+                        # BasicGuider / single-conditioning guiders use 'conditioning' — treat as positive only
+                        if ([string]::IsNullOrWhiteSpace($posRef)) {
+                            $posRef = Get-RefId (Get-PropValue $gi 'conditioning')
+                        }
+                    }
+                }
+            }
+        }
+
+        # Single-conditioning samplers that have 'conditioning' directly (no guider wrapper)
+        if ([string]::IsNullOrWhiteSpace($posRef)) {
+            $posRef = Get-RefId (Get-PropValue $i 'conditioning')
+        }
         $posTexts = Collect-TextsFromNode $Prompt $posRef @{}
         $negTexts = Collect-TextsFromNode $Prompt $negRef @{}
         $result.PositivePrompt = Join-Unique $posTexts "`r`n---`r`n"
@@ -1581,10 +1609,11 @@ function Parse-ComfyPrompt {
     $result.LoRAs = Join-Unique $loraRows "`r`n"
 
     $modelNames = New-Object System.Collections.Generic.List[string]
-    foreach ($n in ($nodes | Where-Object { $_.Class -match '(?i)(CheckpointLoader|UNETLoader|UnetLoader|DiffusionModelLoader|ModelLoader|Nunchaku|GGUF)' })) {
+    $modelClassRegex = '(?i)(CheckpointLoader|UNETLoader|UnetLoader|DiffusionModelLoader|ModelLoader|Nunchaku|GGUF|HunyuanVideo|CogVideo|WanVideo|Wan2|Mochi|AuraFlow|LTXVideo|LTXV|HiDream|StableCascade)'
+    foreach ($n in ($nodes | Where-Object { $_.Class -match $modelClassRegex })) {
         $inp = $n.Inputs
         if ($null -eq $inp) { continue }
-        foreach ($key in @('ckpt_name','unet_name','model_name','diffusion_model','gguf_name','model','vae_name')) {
+        foreach ($key in @('ckpt_name','unet_name','model_name','diffusion_model','gguf_name','base_model_name','checkpoint_name','model','vae_name')) {
             $val = Get-PropValue $inp $key
             if ($null -ne $val -and -not (Is-RefArray $val)) {
                 $s = ([string]$val).Trim()
@@ -1594,11 +1623,36 @@ function Parse-ComfyPrompt {
     }
     $result.Model = Join-Unique $modelNames.ToArray()
 
+    # Key-based model fallback: catches novel loader classes not in the regex above.
+    # Requires a model-file extension to avoid picking up VAE or LoRA filenames from generic nodes.
+    if ([string]::IsNullOrWhiteSpace([string]$result.Model)) {
+        $modelFallbackKeys = @('ckpt_name','unet_name','model_name','diffusion_model','gguf_name','base_model_name','checkpoint_name')
+        $modelFallbackNames = New-Object System.Collections.Generic.List[string]
+        $modelSkipRegex = '(?i)(VAELoader|CLIPLoader|LoraLoader|LoRALoader|LycoLoader|ControlNetLoader|IPAdapterLoader|UpscaleModelLoader|StyleModelLoader)'
+        foreach ($n in $nodes) {
+            if ($n.Class -match $modelClassRegex) { continue }
+            if ($n.Class -match $modelSkipRegex) { continue }
+            $inp = $n.Inputs
+            if ($null -eq $inp) { continue }
+            foreach ($key in $modelFallbackKeys) {
+                $val = Get-PropValue $inp $key
+                if ($null -ne $val -and -not (Is-RefArray $val)) {
+                    $s = ([string]$val).Trim()
+                    if ($s.Length -gt 0 -and $s -match '(?i)\.(safetensors|gguf|pt|pth|ckpt|bin)$') {
+                        [void]$modelFallbackNames.Add($s)
+                    }
+                }
+            }
+        }
+        if ($modelFallbackNames.Count -gt 0) { $result.Model = Join-Unique $modelFallbackNames.ToArray() }
+    }
+
     $encNames = New-Object System.Collections.Generic.List[string]
-    foreach ($n in ($nodes | Where-Object { $_.Class -match '(?i)(CLIPLoader|DualCLIPLoader|TripleCLIPLoader|TextEncoder|T5|UMT5|BERT)' })) {
+    $encClassRegex = '(?i)(CLIPLoader|DualCLIPLoader|TripleCLIPLoader|QuadrupleCLIPLoader|TextEncoder|T5|UMT5|BERT)'
+    foreach ($n in ($nodes | Where-Object { $_.Class -match $encClassRegex })) {
         $inp = $n.Inputs
         if ($null -eq $inp) { continue }
-        foreach ($key in @('clip_name','clip_name1','clip_name2','clip_name3','t5_name','bert_name','text_encoder_name','tokenizer_name')) {
+        foreach ($key in @('clip_name','clip_name1','clip_name2','clip_name3','clip_name4','t5_name','bert_name','text_encoder_name','tokenizer_name','te_name','vision_encoder_name')) {
             $val = Get-PropValue $inp $key
             if ($null -ne $val -and -not (Is-RefArray $val)) {
                 $s = ([string]$val).Trim()
@@ -1607,6 +1661,29 @@ function Parse-ComfyPrompt {
         }
     }
     $result.TextEncoder = Join-Unique $encNames.ToArray()
+
+    # Key-based text encoder fallback: catches novel loader/encoder classes not in the regex above.
+    if ([string]::IsNullOrWhiteSpace([string]$result.TextEncoder)) {
+        $encFallbackKeys = @('clip_name','clip_name1','clip_name2','clip_name3','clip_name4','t5_name','bert_name','text_encoder_name','tokenizer_name','te_name')
+        $encFallbackNames = New-Object System.Collections.Generic.List[string]
+        foreach ($n in $nodes) {
+            if ($n.Class -match $encClassRegex) { continue }
+            # Only consider nodes that look like loaders or text/clip-related processors
+            if ($n.Class -notmatch '(?i)(Loader|Encoder|CLIP|TextModel|Tokenizer)') { continue }
+            # Exclude known non-encoder loaders to avoid false positives
+            if ($n.Class -match '(?i)(CheckpointLoader|VAELoader|LoraLoader|LoRALoader|ControlNetLoader|IPAdapterLoader|UpscaleModelLoader|ImageLoader|VideoLoader)') { continue }
+            $inp = $n.Inputs
+            if ($null -eq $inp) { continue }
+            foreach ($key in $encFallbackKeys) {
+                $val = Get-PropValue $inp $key
+                if ($null -ne $val -and -not (Is-RefArray $val)) {
+                    $s = ([string]$val).Trim()
+                    if ($s.Length -gt 0) { [void]$encFallbackNames.Add($s) }
+                }
+            }
+        }
+        if ($encFallbackNames.Count -gt 0) { $result.TextEncoder = Join-Unique $encFallbackNames.ToArray() }
+    }
 
     return $result
 }
