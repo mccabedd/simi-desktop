@@ -1,6 +1,6 @@
 <#
 ComfyUI-PNG-Meta.ps1
-v3.8
+v3.9
 Extracts useful ComfyUI generation metadata from PNG tEXt/iTXt/zTXt chunks.
 Outputs HTML with per-row copy buttons, plain text, JSON, or a single field for Directory Opus columns.
 #>
@@ -315,7 +315,7 @@ function Collect-TextsFromNode {
     if ($null -eq $inputs) { return @() }
 
     $texts = New-Object System.Collections.Generic.List[string]
-    foreach ($key in @('text','text_g','text_l','prompt','positive','negative')) {
+    foreach ($key in @('text','text_g','text_l','prompt','prompt_text','positive','negative')) {
         $v = Get-PropValue $inputs $key
         if ($null -ne $v -and -not (Is-RefArray $v)) {
             $s = [string]$v
@@ -1595,8 +1595,15 @@ function Parse-ComfyPrompt {
         $textNodes = $nodes | Where-Object { $_.Class -match '(?i)CLIPTextEncode' }
         $texts = @()
         foreach ($n in $textNodes) {
-            $txt = First-NotBlank @((Get-PropValue $n.Inputs 'text'), (Get-PropValue $n.Inputs 'text_g'), (Get-PropValue $n.Inputs 'text_l'))
-            if ($txt.Length -gt 0) { $texts += $txt }
+            foreach ($k in @('text','text_g','text_l')) {
+                $val = Get-PropValue $n.Inputs $k
+                # Guard: skip ref arrays — without this, ['72',0] coerces to "72 0",
+                # making the node ID appear as the prompt text.
+                if ($null -ne $val -and -not (Is-RefArray $val)) {
+                    $s = ([string]$val).Trim()
+                    if ($s.Length -gt 0) { $texts += $s; break }
+                }
+            }
         }
         $result.PositivePrompt = Join-Unique $texts "`r`n---`r`n"
     }
